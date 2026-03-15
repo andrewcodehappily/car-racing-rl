@@ -1,0 +1,34 @@
+# 虛擬環境
+.venv/
+venv/
+env/
+ 
+# 模型檔（太大，不上傳）
+models/
+timebest/
+ 
+# TensorBoard logs
+logs/
+ 
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+ 
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+ 
+# 編輯器
+.vscode/
+.idea/
+*.swp
+*.swo
+ 
+# 暫存
+*.tmp
+*.bak
+ 

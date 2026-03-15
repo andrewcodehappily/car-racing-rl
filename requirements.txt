@@ -1,0 +1,7 @@
+gymnasium[box2d]>=0.29.1
+stable-baselines3[extra]>=2.3.2
+tensorboard>=2.17.0
+opencv-python>=4.10.0
+numpy>=2.0.0
+torch>=2.6.0
+matplotlib>=3.9.0
