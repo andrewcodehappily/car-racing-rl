@@ -2,7 +2,7 @@
 .venv/
 venv/
 env/
- 
+
 # 模型檔（太大，不上傳）
 models/
 timebest/
@@ -19,7 +19,7 @@ __pycache__/
  
 # macOS
 .DS_Store
-.AppleDouble
+.AppleDoublews
 .LSOverride
  
 # 編輯器
@@ -31,4 +31,4 @@ __pycache__/
 # 暫存
 *.tmp
 *.bak
- 
+
