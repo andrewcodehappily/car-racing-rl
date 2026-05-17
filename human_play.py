@@ -45,6 +45,13 @@ HISTORY_LEN     = 200     # 儀表板歷史曲線長度（幾步）
 # ╚══════════════════════════════════════════════════════╝
 
 
+class RandomSeedWrapper(gym.Wrapper):
+    """每次 reset 自動隨機種子，確保地圖每次都不同"""
+    def reset(self, **kwargs):
+        kwargs["seed"] = np.random.randint(0, 2**31)
+        return self.env.reset(**kwargs)
+
+
 # ── 按鍵狀態 ─────────────────────────────────────────
 class Keys:
     left = right = gas = brake = quit = restart = False
@@ -303,9 +310,9 @@ def main():
     pygame.init()
 
     limit = MAX_STEPS if MAX_STEPS > 0 else 999999
-    env   = gym.make("CarRacing-v3", continuous=True,
-                     render_mode="human",
-                     max_episode_steps=limit)
+    env   = RandomSeedWrapper(gym.make("CarRacing-v3", continuous=True,
+                                       render_mode="human",
+                                       max_episode_steps=limit))
 
     dash = Dashboard() if DASHBOARD else None
 

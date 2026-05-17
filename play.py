@@ -26,6 +26,16 @@ from stable_baselines3.common.vec_env import VecFrameStack, DummyVecEnv, VecTran
 HISTORY_LEN = 300
 
 
+class RandomSeedWrapper(gym.Wrapper):
+    """每次 reset 自動隨機種子，確保地圖每次都不同"""
+    def reset(self, **kwargs):
+        kwargs["seed"] = np.random.randint(0, 2**31)
+        return self.env.reset(**kwargs)
+
+
+
+
+
 # ── 儀表板 ────────────────────────────────────────────
 class Dashboard:
     def __init__(self):
@@ -156,9 +166,9 @@ class Dashboard:
 # ── 環境 & 動作 ───────────────────────────────────────
 def make_render_env(max_steps: int):
     def _init():
-        return gym.make("CarRacing-v3", continuous=True,
-                        render_mode="human",
-                        max_episode_steps=max_steps)
+        return RandomSeedWrapper(gym.make("CarRacing-v3", continuous=True,
+                                          render_mode="human",
+                                          max_episode_steps=max_steps))
     return _init
 
 

@@ -19,6 +19,13 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import VecFrameStack, DummyVecEnv, VecTransposeImage
 
 
+class RandomSeedWrapper(gym.Wrapper):
+    """每次 reset 自動隨機種子，確保地圖每次都不同"""
+    def reset(self, **kwargs):
+        kwargs["seed"] = np.random.randint(0, 2**31)
+        return self.env.reset(**kwargs)
+
+
 # ── 鍵盤狀態（全域，讓兩個執行緒都能讀）──────────────
 class KeyState:
     def __init__(self):
@@ -78,8 +85,8 @@ def postprocess(a: np.ndarray) -> np.ndarray:
 
 def run_ai_episode(model_path: str, result: dict, idx: int, max_steps: int):
     """AI 在背景跑，結果存進 result[idx]"""
-    env = gym.make("CarRacing-v3", continuous=True,
-                   render_mode=None, max_episode_steps=max_steps)
+    env = RandomSeedWrapper(gym.make("CarRacing-v3", continuous=True,
+                                     render_mode=None, max_episode_steps=max_steps))
     vec = DummyVecEnv([lambda: env])
     vec = VecFrameStack(vec, n_stack=4)
     vec = VecTransposeImage(vec)
@@ -103,8 +110,9 @@ def run_ai_episode(model_path: str, result: dict, idx: int, max_steps: int):
 
 def run_human_episode(max_steps: int) -> dict:
     """人類用 pygame 視窗玩"""
-    env  = gym.make("CarRacing-v3", continuous=True,
-                    render_mode="human", max_episode_steps=max_steps)
+    env  = RandomSeedWrapper(gym.make("CarRacing-v3", continuous=True,
+                                      render_mode="human",
+                                      max_episode_steps=max_steps))
     obs, _ = env.reset()
     total  = 0.0
     steps  = 0

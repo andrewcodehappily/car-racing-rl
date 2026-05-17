@@ -23,7 +23,7 @@ import numpy as np
 import gymnasium as gym
 
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import VecFrameStack, DummyVecEnv, VecTransposeImage
+from stable_baselines3.common.vec_env import VecFrameStack, SubprocVecEnv, VecTransposeImage
 from stable_baselines3.common.callbacks import (
     BaseCallback, CheckpointCallback, EvalCallback, CallbackList,
 )
@@ -35,7 +35,7 @@ from stable_baselines3.common.utils import set_random_seed
 # ════════════════════════════════════════════════════════
 SEED        = 42
 N_STACK     = 4
-N_ENVS      = 4
+N_ENVS      = 8
 TOTAL_STEPS = 1_000_000
 EVAL_FREQ   = 20_000
 N_EVAL_EPS  = 5
@@ -98,16 +98,13 @@ class LRHolder:
 _lr_holder = LRHolder(3e-4)
 
 def set_lr(model: PPO, lr: float) -> None:
-    """[修正1] 透過 LRHolder 確保 lr 真正生效"""
+    """[修正1] 強制 model 用全域 LRHolder，避免 resume 後讀到舊值"""
     _lr_holder.value = lr
-    # 確保 model 的 schedule 指向同一個 holder
-    if not isinstance(model.learning_rate, LRHolder):
-        model.learning_rate = _lr_holder
-    # 同時直接更新 optimizer（雙保險）
+    model.learning_rate = _lr_holder  # 強制取代，不管原本是什麼（修正序列化後不同實例的 bug）
     for pg in model.policy.optimizer.param_groups:
         pg["lr"] = lr
     actual = model.policy.optimizer.param_groups[0]["lr"]
-    print(f"  [lr] optimizer 實際 lr = {actual:.2e}  holder = {_lr_holder.value:.2e}")
+    print(f"  [lr] optimizer lr={actual:.2e} (holder={_lr_holder.value:.2e})")
 
 
 def adaptive_lr_decay(lr: float, base_lr: float) -> float:
@@ -182,7 +179,6 @@ class RewardShapingWrapper(gym.Wrapper):
         self._off_track_steps = 0
         self._spinning_steps  = 0
         self._total_steps     = 0
-        self._tiles_visited   = 0
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
@@ -211,7 +207,6 @@ class RewardShapingWrapper(gym.Wrapper):
             shaped -= self.OFF_TRACK_COEF * self._off_track_steps
         else:
             self._off_track_steps = 0
-            self._tiles_visited  += 1
 
         if self._off_track_steps > self.OFF_TRACK_LIMIT:
             terminated = True
@@ -275,6 +270,7 @@ class ProgressCallback(BaseCallback):
         self.ep_lengths  = []
         self._last_viz   = 0
         self._t0         = time.time()
+        self._start_ts   = None  # 記錄 session 起始步數，修正無限模式進度條
 
     def _on_step(self) -> bool:
         for info in self.locals.get("infos", []):
@@ -296,9 +292,14 @@ class ProgressCallback(BaseCallback):
             self._print()
         return True
 
+    def _session_steps(self) -> int:
+        if self._start_ts is None:
+            self._start_ts = self.num_timesteps
+        return self.num_timesteps - self._start_ts
+
     def _print(self):
         elapsed = time.time() - self._t0
-        steps   = self.num_timesteps
+        steps   = self._session_steps()
         pct     = min(steps / max(self.total_steps, 1) * 100, 100)
         # [修正16] elapsed > 1 才計算，避免 fps=0 除以零
         fps     = int(steps / elapsed) if elapsed > 1 else 0
@@ -325,16 +326,19 @@ class ProgressCallback(BaseCallback):
 # ════════════════════════════════════════════════════════
 class StabilizeCallback(BaseCallback):
     """
-    [修正4] 每 CHECK_FREQ 步監控 std：
-      std > 6   → 危險，同時降 ent_coef / lr / clip
-      std > 4   → 偏高，降 ent_coef + lr
-      std < 1.5 → 偏低，稍微提高 ent_coef 防過擬合
+    [修正4] 每 CHECK_FREQ 步監控 std + clip_fraction：
+      std > 6       → 危險，同時降 ent_coef / lr / clip
+      std > 4       → 偏高，降 ent_coef + lr
+      clip > 0.3    → 更新過大，降 lr（低 std 時特別容易發生）
+      std < 1.5     → 偏低，稍微提高 ent_coef 防過擬合
     """
     CHECK_FREQ = 2048
+    CLIP_FRAC_THRESH = 0.30
 
     def __init__(self, verbose=0):
         super().__init__(verbose)
-        self._last_check = 0
+        self._last_check   = 0
+        self._clip_reduced = False
 
     def _on_step(self) -> bool:
         if self.num_timesteps - self._last_check < self.CHECK_FREQ:
@@ -348,17 +352,30 @@ class StabilizeCallback(BaseCallback):
         except Exception:
             return True
 
+        # 從 logger 讀取最近的 clip_fraction
+        clip_frac = self.logger.name_to_value.get("clip_fraction", 0.0)
+
         ent    = float(self.model.ent_coef)
         cur_lr = float(self.model.policy.optimizer.param_groups[0]["lr"])
 
+        # ── 優先處理 clip_fraction 過高（std <= 4 時，由 clip 主導降 lr）──
+        if clip_frac > self.CLIP_FRAC_THRESH and cur_lr > LR_MIN and std <= 4.0:
+            scale  = max(self.CLIP_FRAC_THRESH / max(clip_frac, 0.01), 0.3)
+            new_lr = max(cur_lr * scale, LR_MIN)
+            print(f"\n  [穩定] 📉 clip_fraction={clip_frac:.2f} 過高！"
+                  f"  lr {cur_lr:.2e}→{new_lr:.2e}")
+            set_lr(self.model, new_lr)
+
+        # ── std 相關處理 ──
         if std > 6.0:
             new_ent = max(ent * 0.5, 1e-4)
             new_lr  = max(cur_lr * 0.5, LR_MIN)
             print(f"\n  [穩定] ⚠️  std={std:.2f} 危險！"
                   f"  ent {ent:.4f}→{new_ent:.4f}"
                   f"  lr {cur_lr:.2e}→{new_lr:.2e}  clip→0.08")
-            self.model.ent_coef   = new_ent
-            self.model.clip_range = lambda _: 0.08
+            self.model.ent_coef    = new_ent
+            self.model.clip_range  = lambda _: 0.08
+            self._clip_reduced     = True
             set_lr(self.model, new_lr)
 
         elif std > 4.0:
@@ -370,14 +387,20 @@ class StabilizeCallback(BaseCallback):
             self.model.ent_coef = new_ent
             set_lr(self.model, new_lr)
 
+        elif 1.5 <= std <= 4.0 and self._clip_reduced:
+            self.model.clip_range  = lambda _: 0.2
+            self._clip_reduced     = False
+            print(f"\n  [穩定] std={std:.2f} 已恢復  clip_range 回到 0.2")
+
         elif std < 1.5 and ent < 0.005:
             new_ent = min(ent * 1.2, 0.005)
             print(f"\n  [穩定] std={std:.2f} 偏低  ent {ent:.4f}→{new_ent:.4f}")
             self.model.ent_coef = new_ent
 
-        self.logger.record("custom/std_live",      std)
-        self.logger.record("custom/ent_coef_live", float(self.model.ent_coef))
-        self.logger.record("custom/lr_live",       cur_lr)
+        self.logger.record("custom/std_live",        std)
+        self.logger.record("custom/ent_coef_live",   float(self.model.ent_coef))
+        self.logger.record("custom/lr_live",         cur_lr)
+        self.logger.record("custom/clip_frac_live",  clip_frac)
         return True
 
 
@@ -405,9 +428,12 @@ def make_env(rank: int = 0, seed: int = 0, session: int = 1):
 
 
 def build_vec_env(n_envs: int = N_ENVS, session: int = 1):
-    """[修正13] 包 try/except，印出友善錯誤"""
+    """[修正13] 包 try/except，印出友善錯誤。用 SubprocVecEnv 多進程加速"""
     try:
-        envs = DummyVecEnv([make_env(i, SEED, session) for i in range(n_envs)])
+        envs = SubprocVecEnv(
+            [make_env(i, SEED, session) for i in range(n_envs)],
+            start_method="spawn",
+        )
         envs = VecFrameStack(envs, n_stack=N_STACK)
         envs = VecTransposeImage(envs)
         return envs
